@@ -38,7 +38,7 @@ class Circle(Shape):
             for y in range(self.y - self.size, self.y + self.size + 1):
                 # if coords within circle radius and in image bounds
                 if (x - self.x) ** 2 + (y - self.y) ** 2 <= self.size ** 2 and \
-                        0 <= x < len(self.canvas) and 0 <= y < len(self.canvas[0]):
+                        0 <= y < len(self.canvas) and 0 <= x < len(self.canvas[0]):
                     circle_pixels.append((x, y, self.canvas[y][x]))
         return circle_pixels
 
@@ -49,7 +49,7 @@ class Circle(Shape):
             for y in range(self.y - self.size, self.y + self.size + 1):
                 # if coords within circle radius and in image bounds
                 if (x - self.x) ** 2 + (y - self.y) ** 2 <= self.size ** 2 and \
-                        0 <= x < len(self.canvas) and 0 <= y < len(self.canvas[0]):
+                        0 <= y < len(self.canvas) and 0 <= x < len(self.canvas[0]):
                     all_colors += self.canvas[y][x]
                     total += 1
         return all_colors // total

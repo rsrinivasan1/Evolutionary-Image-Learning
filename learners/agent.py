@@ -7,7 +7,7 @@ class Agent:
         self.original = original.astype(np.float32)
         self.width = width
         self.height = height
-        self.canvas = 255 * np.ones((self.width, self.height, 3), dtype=np.uint8)
+        self.canvas = 255 * np.ones((self.height, self.width, 3), dtype=np.uint8)
         self.shape_type = shape_type
 
     def compute_loss(self):
