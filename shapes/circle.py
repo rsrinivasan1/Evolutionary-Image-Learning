@@ -5,23 +5,28 @@ import numpy as np
 class Circle(Shape):
     def __init__(self, original, canvas, coords, size, color=None):
         super().__init__(original, canvas, coords, size, color)
-        self.alpha = 0.8
+        self.alpha = None
         self.color = None
         self.alpha_color = None
-        self.set_color(color)
+        self.set_color(color, 1)
         self.pixels_under = self.get_pixels_under()
 
-    def set_color(self, color):
+    def set_color(self, color, alpha=None):
         self.color = color
+        if alpha is not None:
+            self.alpha = alpha
         if color is not None:
             self.alpha_color = (color[0] * self.alpha,
                             color[1] * self.alpha,
                             color[2] * self.alpha)
 
     def update(self):
-        overlay = self.canvas.copy()
-        cv2.circle(overlay, (self.x, self.y), self.size, self.color, -1)
-        cv2.addWeighted(overlay, self.alpha, self.canvas, 1 - self.alpha, 0, self.canvas)
+        if self.alpha == 1:
+            cv2.circle(self.canvas, (self.x, self.y), self.size, self.color, -1)
+        else:
+            overlay = self.canvas.copy()
+            cv2.circle(overlay, (self.x, self.y), self.size, self.color, -1)
+            cv2.addWeighted(overlay, self.alpha, self.canvas, 1 - self.alpha, 0, self.canvas)
 
     def get_pixels_under(self):
         """
@@ -57,9 +62,13 @@ class Circle(Shape):
 
     def loss_after(self):
         after = 0
-        for x, y, color in self.pixels_under:
-            new_color = self.alpha_color + color * (1 - self.alpha)
-            after += np.sum((new_color - self.original[y][x]) ** 2)
+        if self.alpha == 1:
+            for x, y, _ in self.pixels_under:
+                after += np.sum((self.color - self.original[y][x]) ** 2)
+        else:
+            for x, y, color in self.pixels_under:
+                new_color = self.alpha_color + color * (1 - self.alpha)
+                after += np.sum((new_color - self.original[y][x]) ** 2)
         return after
 
     def __str__(self):

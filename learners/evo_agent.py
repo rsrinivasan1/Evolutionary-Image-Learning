@@ -1,6 +1,6 @@
 import numpy as np
 from .agent import Agent
-from random import randint
+from random import randint, random
 from time import time
 
 
@@ -26,9 +26,10 @@ class EvoAgent(Agent):
         loss = initial
         for i in range(500000):
             # try different mutations
-            x_start, x_end, y_start, y_end = self.get_sector(20, i)
+            x_start, x_end, y_start, y_end = self.get_sector(10, i)
             before = 0
             after = 1
+            shape = None
             while after >= before * 0.8:
                 x = randint(x_start, x_end)
                 y = randint(y_start, y_end)
