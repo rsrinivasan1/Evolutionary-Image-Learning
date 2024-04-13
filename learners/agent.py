@@ -14,7 +14,9 @@ class Agent:
     def compute_loss(self):
         return np.sum((self.original - self.canvas) ** 2)
 
-    def create_shape(self, coords, size):
+    def create_shape(self, coords, size, canvas=None, color=None):
+        if canvas is None:
+            canvas = self.canvas
         if self.shape_type == ShapeTypes.CIRCLE:
-            shape = Circle(self.original, self.canvas, coords, size, color=None)
+            shape = Circle(self.original, canvas, coords, size, color=color)
             return shape

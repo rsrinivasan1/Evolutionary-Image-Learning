@@ -40,7 +40,7 @@ class EvoAgent(Agent):
         initial = self.compute_loss()
         loss = initial
         num_sectors = 20
-        for i in range(500000):
+        for i in range(100000):
             # try different mutations
             x_start, x_end, y_start, y_end = self.get_sector(num_sectors, i)
             before = 0
