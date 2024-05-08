@@ -4,7 +4,7 @@ import numpy as np
 
 from shapes.shape_types import ShapeTypes
 from shapes.circle import Circle
-# from learners.rl_agent import RLAgent
+from learners.rl_agent import RLAgent
 from learners.evo_agent import EvoAgent
 
 class Runner:
@@ -17,8 +17,8 @@ class Runner:
 
         if agent == "evo":
             self.agent = EvoAgent(self.original, self.width, self.height, self.shape_type, self)
-        # else:
-        #     self.agent = RLAgent(self.original, self.width, self.height, self.shape_type)
+        else:
+            self.agent = RLAgent(self.original, self.width, self.height, self.shape_type, self)
 
         plt.tight_layout()
         self.render_original()

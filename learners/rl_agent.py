@@ -63,37 +63,45 @@ class RLAgent(Agent):
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(64 * width * height, 128),  # Adjust input size based on width and height
+            nn.Conv2d(64, 1, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Linear(128, 12),  # output size is 12 for the specified means and variances
-            nn.Tanh()  # tanh activation for bounding output between -1 and 1
+            nn.Flatten(),
+            nn.Linear(width * height, 512),  # Adjust input size based on width and height
+            nn.ReLU(),
+            nn.Linear(512, 12),  # output size is 12 for the specified means and variances
+            nn.Sigmoid()  # activation for bounding output between 0 and 1
         )
         # Value function network:
         #   - input: self.canvas
         #   - output: estimate of discounted reward
         self.value_network = nn.Sequential(
-            nn.Linear(self.width * self.height * 3, 128),
+            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Linear(128, 128),
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Linear(128, 1)  # output size 1 for the value estimate
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(width * height, 128),  # Adjust input size based on width and height
+            nn.ReLU(),
+            nn.Linear(128, 1),  # output size is 12 for the specified means and variances
         )
 
-    def tanh_to_range(self, x, min_val, max_val):
-        return int(((x + 1) / 2) * (max_val - min_val) + min_val)
+    def sigmoid_to_range(self, x, min_val, max_val):
+        return int(x * (max_val - min_val) + min_val)
 
     def get_denormalized_action(self, action):
         x, y, radius, r, g, b = action
-        return (self.tanh_to_range(x, 0, self.width),
-                self.tanh_to_range(y, 0, self.height),
-                self.tanh_to_range(radius, 3, self.width // 32),
-                self.tanh_to_range(r, 0, 255),
-                self.tanh_to_range(g, 0, 255),
-                self.tanh_to_range(b, 0, 255))
+        return (self.sigmoid_to_range(x, 0, self.width),
+                self.sigmoid_to_range(y, 0, self.height),
+                self.sigmoid_to_range(radius, 3, self.width // 32),
+                self.sigmoid_to_range(r, 0, 255),
+                self.sigmoid_to_range(g, 0, 255),
+                self.sigmoid_to_range(b, 0, 255))
 
     def get_reward_from_action(self, action, canvas):
         x, y, radius, r, g, b = self.get_denormalized_action(action)
+        print(x, y, radius, r, g, b)
         shape = self.create_shape((x, y), radius, canvas, (r, g, b))
         before = shape.loss_before()
         after = shape.loss_after()
@@ -104,28 +112,41 @@ class RLAgent(Agent):
         reward = before - after
         return reward
 
+    def get_r_theta(self):
+        return 0
+
     def train(self):
-        num_actors = 50
-        T = 50
+        num_actors = 1
+        T = 10
         optimizer_policy = optim.Adam(self.policy_network.parameters(), lr=0.001)
         optimizer_value = optim.Adam(self.value_network.parameters(), lr=0.001)
-        clip_ratio = 0.2  # PPO clip ratio
+        epsilon = 0.2  # PPO clip ratio
+        discount_factor = 0.95
         for i in range(10000):
             for j in range(num_actors):
                 # 1. For each actor, run the current policy for T timesteps
-                actual_rewards = []
-                estimated_rewards = []
+                # actual_rewards contains the undiscounted rewards from each timestep
+                actual_rewards = [0]
+                # estimated_rewards contains the DISCOUNTED total reward estimate — this
+                # is what we try to learn
+                estimated_rewards = [0]
+                # copy canvas and move RGB channel dimension to front
                 actor_canvas = self.canvas.copy()
+                torch_canvas = torch.moveaxis(torch.from_numpy(actor_canvas).float(), 2, 0)
+
                 for k in range(T):
-                    action_means_variances = self.policy_network(actor_canvas)
-                    action_means, action_variances = torch.split(action_means_variances, 6)  # Split means and variances
-                    action = torch.normal(action_means, action_variances)  # Sample from normal distribution
-                    # Expect this to have size 12
-                    print(action_means_variances.shape)
-                    actual_rewards.append(self.get_reward_from_action(action, actor_canvas))
+                    action_means_variances = self.policy_network(torch_canvas)
+                    action_means, action_variances = torch.split(action_means_variances, 6, dim=1)  # Split means and variances
+
+                    action_distribution = torch.distributions.Normal(action_means[0], action_variances[0])
+                    action = torch.clamp(action_distribution.sample(), min=0)  # Sample action from the distribution
+
+                    actual_rewards.append(actual_rewards[-1] + (discount_factor ** k) * self.get_reward_from_action(action, actor_canvas))
 
                     # Get expected rewards from value network
-                    estimated_rewards.append(self.value_network(actor_canvas))
+                    estimated_rewards.append(self.value_network(torch_canvas))
 
-                # 2. Compute advantage estimates
-                advantages =
+                # 2. Compute advantage estimates (ignore first dummy element)
+                advantages = [actual_rewards[i] - estimated_rewards[i] for i in range(1, T + 1)]
+                A = sum(ad ** 2 for ad in advantages)
+                r_theta = self.get_r_theta()
