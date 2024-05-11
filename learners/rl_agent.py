@@ -2,6 +2,9 @@ from .agent import Agent
 import torch
 from torch import nn, optim
 import random
+from torch.autograd import Variable
+from time import time
+import numpy as np
 
 class RLAgent(Agent):
     """Wander in some direction and learn from successes & failures
@@ -63,32 +66,20 @@ class RLAgent(Agent):
         # 4th channel is 1 if pixel is the center for the circle to be placed
         # 0 otherwise
         self.policy_network = nn.Sequential(
-            nn.Conv2d(4, 16, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(4, 1, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(width * height, 512),  # Adjust input size based on width and height
-            nn.ReLU(),
-            nn.Linear(512, 8),  # output size is 8 for the specified means and variances
+            nn.Linear(width * height, 8),  # output size is 8 for the specified means and variances
             nn.Sigmoid()  # activation for bounding output between 0 and 1
         )
         # Value function network:
         #   - input: self.canvas
         #   - output: estimate of discounted reward
         self.value_network = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 1, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(3, 1, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(width * height, 128),  # Adjust input size based on width and height
-            nn.ReLU(),
-            nn.Linear(128, 1),  # output size is 12 for the specified means and variances
+            nn.Linear(width * height, 1)  # output size is 12 for the specified means and variances
         )
 
     def sigmoid_to_range(self, x, min_val, max_val):
@@ -103,7 +94,6 @@ class RLAgent(Agent):
 
     def get_reward_from_action(self, y, x, action, canvas):
         radius, r, g, b = self.get_denormalized_action(action)
-        print(x, y, radius, r, g, b)
         shape = self.create_shape((x, y), radius, canvas, (r, g, b))
         before = shape.loss_before()
         after = shape.loss_after()
@@ -112,6 +102,7 @@ class RLAgent(Agent):
         # Return positive reward for reduced loss
         # High loss before - low loss after = big reward
         reward = before - after
+        print(f"Action: {r}, {g}, {b}, reward: {reward}")
         return reward
 
     def get_action_distribution(self, y_x_coords, policy_canvas):
@@ -144,7 +135,7 @@ class RLAgent(Agent):
         :return:
         """
         num_actors = 1
-        T = 10
+        T = 100
         optimizer_policy = optim.Adam(self.policy_network.parameters(), lr=0.001, eps=10 ** -5)
         optimizer_value = optim.Adam(self.value_network.parameters(), lr=0.001, eps=10 ** -5)
         epsilon = 0.2  # PPO clip ratio
@@ -152,25 +143,25 @@ class RLAgent(Agent):
         # Save the previous policy's log probabilities for the next update
         next_coords = []
         prev_actions = []
+
         for i in range(1000):
             for j in range(num_actors):
-                # actual_rewards contains the discounted rewards from each timestep
-                actual_rewards = [0]
-                # estimated_rewards contains the discounted total reward estimate — this
-                # is what we try to learn
-                estimated_rewards = [0]
                 # copy canvas and move RGB channel dimension to front
                 # torch_canvas now has dimensions 3 x height x width
-                actor_canvas = self.canvas.copy()
-                value_canvas = torch.moveaxis(torch.from_numpy(actor_canvas).float(), 2, 0)
+                value_canvas = torch.moveaxis(torch.from_numpy(self.canvas).float(), 2, 0)
                 # add new dimension to tell network where we plan to center the circle
                 policy_canvas = torch.cat((torch.zeros(1, self.height, self.width), value_canvas), dim=0)
+
+                # actual_rewards contains the discounted rewards from each timestep
+                actual_rewards = 0
+                # estimated_rewards contains the discounted total reward estimate — this
+                # is what we try to learn
+                estimated_rewards = float(self.value_network(value_canvas))
 
                 curr_log_probs = []
                 # 1. Run the current policy for T timesteps
                 for t in range(T):
-                    # If first iteration, we don't have an old policy, so we move straight to getting
-                    # log probabilities for the next actions
+                    # If first iteration, we don't have an old policy, so we move to the next step
                     if next_coords == []:
                         break
 
@@ -181,12 +172,13 @@ class RLAgent(Agent):
                     log_prob = action_distribution.log_prob(action_t).sum()
                     curr_log_probs.append(log_prob)
 
-                    action = torch.clamp(action_t, min=0)  # Make action non-negative
+                    action = torch.clamp(action_t, min=0, max=1)  # Make action non-negative
 
-                    actual_rewards.append(actual_rewards[-1] + (discount_factor ** (min(t-1, 0))) * self.get_reward_from_action(y_coord, x_coord, action, actor_canvas))
+                    actual_rewards += (discount_factor ** (min(t-1, 0))) * self.get_reward_from_action(y_coord, x_coord, action, self.canvas)
 
-                    # Get expected rewards from value network
-                    estimated_rewards.append(self.value_network(value_canvas))
+                # TODO: update canvas with new pixels placed
+                self.runner.render()
+                print("ARE WE RENDERING???...")
 
                 # 2. Prepare random x, y coords for after we update the policy, and get probability
                 # values to calculate r_theta for each of the T actions
@@ -194,7 +186,8 @@ class RLAgent(Agent):
                 prev_actions = []
                 prev_log_probs = []
                 for _ in range(T):
-                    y_x_coords = (random.randint(0, self.height - 1), random.randint(0, self.width - 1))
+                    # y_x_coords = (random.randint(0, self.height - 1), random.randint(0, self.width - 1))
+                    y_x_coords = (20, 20)
                     next_coords.append(y_x_coords)
                     action, log_prob = self.get_action_and_log_prob(y_x_coords, policy_canvas)
                     prev_actions.append(action)
@@ -202,8 +195,25 @@ class RLAgent(Agent):
 
                 # 3. Compute advantage estimates (ignore first dummy element)
                 if curr_log_probs != []:
-                    advantages = torch.tensor([actual_rewards[i] - estimated_rewards[i] for i in range(1, T + 1)])
-                    # Normalize advantages
-                    advantages = (advantages - advantages.mean()) / (advantages.std(dim=0) + 1e-8)
+                    # advantages = torch.tensor([actual_rewards[i] - estimated_rewards[i] for i in range(1, T + 1)])
+                    # # Normalize advantages
+                    # advantages = (advantages - advantages.mean()) / (advantages.std(dim=0) + 1e-8)
+                    advantages = actual_rewards - estimated_rewards
 
                     r_theta = torch.exp(torch.tensor(curr_log_probs) - torch.tensor(prev_log_probs))
+
+                    term1 = advantages * r_theta
+                    term2 = torch.clamp(r_theta, 1 - epsilon, 1 + epsilon) * advantages
+
+                    policy_loss = Variable(torch.min(term1, term2).mean(), requires_grad=True)
+                    value_loss = Variable(nn.MSELoss()(torch.tensor(estimated_rewards), torch.tensor(actual_rewards)), requires_grad=True)
+                    print(policy_loss)
+                    print(value_loss)
+
+                    optimizer_policy.zero_grad()
+                    policy_loss.backward()
+                    optimizer_policy.step()
+
+                    optimizer_value.zero_grad()
+                    value_loss.backward()
+                    optimizer_value.step()
