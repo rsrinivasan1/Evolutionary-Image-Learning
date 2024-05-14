@@ -1,10 +1,11 @@
 from .agent import Agent
 import torch
 from torch import nn, optim
-import random
-from torch.autograd import Variable
 from time import time
-import numpy as np
+import copy
+
+torch.autograd.set_detect_anomaly(True)
+
 
 class RLAgent(Agent):
     """Wander in some direction and learn from successes & failures
@@ -55,6 +56,7 @@ class RLAgent(Agent):
 
     IDEA: choose x, y coordinates and make the network learn colors and sizes
     """
+
     def __init__(self, original, width, height, shape_type, runner):
         super().__init__(original, width, height, shape_type, runner)
         # Policy network:
@@ -70,27 +72,18 @@ class RLAgent(Agent):
             nn.ReLU(),
             nn.Flatten(),
             nn.Linear(width * height, 8),  # output size is 8 for the specified means and variances
-            nn.Sigmoid()  # activation for bounding output between 0 and 1
-        )
-        # Value function network:
-        #   - input: self.canvas
-        #   - output: estimate of discounted reward
-        self.value_network = nn.Sequential(
-            nn.Conv2d(3, 1, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(width * height, 1)  # output size is 12 for the specified means and variances
+            nn.ReLU()  # activation for bounding output between 0 and 1
         )
 
-    def sigmoid_to_range(self, x, min_val, max_val):
+    def relu_to_range(self, x, min_val, max_val):
         return int(x * (max_val - min_val) + min_val)
 
     def get_denormalized_action(self, action):
         radius, r, g, b = action
-        return (self.sigmoid_to_range(radius, 3, self.width // 32),
-                self.sigmoid_to_range(r, 0, 255),
-                self.sigmoid_to_range(g, 0, 255),
-                self.sigmoid_to_range(b, 0, 255))
+        return (self.relu_to_range(radius, 3, self.width // 32),
+                self.relu_to_range(r, 0, 255),
+                self.relu_to_range(g, 0, 255),
+                self.relu_to_range(b, 0, 255))
 
     def get_reward_from_action(self, y, x, action, canvas):
         radius, r, g, b = self.get_denormalized_action(action)
@@ -102,27 +95,24 @@ class RLAgent(Agent):
         # Return positive reward for reduced loss
         # High loss before - low loss after = big reward
         reward = before - after
-        print(f"Action: {r}, {g}, {b}, reward: {reward}")
         return reward
 
-    def get_action_distribution(self, y_x_coords, policy_canvas):
-        y_coord, x_coord = y_x_coords
-
-        policy_canvas[0][y_coord][x_coord] = 1
-
+    def get_action_distribution(self, policy_canvas):
         action_means_variances = self.policy_network(policy_canvas)
-        action_means, action_variances = torch.split(action_means_variances, 4, dim=1)  # Split means and variances
+        action_means = torch.stack([action_means_variances[0][0],
+                                    action_means_variances[0][1],
+                                    action_means_variances[0][2],
+                                    action_means_variances[0][3]])
+        action_variances = nn.Softplus()(torch.stack([action_means_variances[0][4],
+                                                      action_means_variances[0][5],
+                                                      action_means_variances[0][6],
+                                                      action_means_variances[0][7]]))
 
-        # reset
-        policy_canvas[0][y_coord][x_coord] = 0
-
-        # Take element 0 because of how pytorch works
-        action_distribution = torch.distributions.Normal(action_means[0], action_variances[0])
-
+        action_distribution = torch.distributions.Normal(action_means, action_variances)
         return action_distribution
 
-    def get_action_and_log_prob(self, y_x_coords, policy_canvas):
-        action_distribution = self.get_action_distribution(y_x_coords, policy_canvas)
+    def get_action_and_log_prob(self, policy_canvas):
+        action_distribution = self.get_action_distribution(policy_canvas)
         orig_action = action_distribution.sample()
         log_prob = action_distribution.log_prob(orig_action).sum()
 
@@ -131,89 +121,111 @@ class RLAgent(Agent):
     def train(self):
         """
         NOTES:
-        Update policy and value networks after T timesteps, for each actor
-        :return:
+        Update policy network after T timesteps, for each actor
         """
-        num_actors = 1
-        T = 100
-        optimizer_policy = optim.Adam(self.policy_network.parameters(), lr=0.001, eps=10 ** -5)
-        optimizer_value = optim.Adam(self.value_network.parameters(), lr=0.001, eps=10 ** -5)
+        num_actors = 1000
+        T = 1
+        optimizer_policy = optim.Adam(self.policy_network.parameters())
         epsilon = 0.2  # PPO clip ratio
-        discount_factor = 0.9
         # Save the previous policy's log probabilities for the next update
         next_coords = []
         prev_actions = []
+        prev_log_probs = []
+
+        start = time()
+        initial = self.compute_loss()
 
         for i in range(1000):
+            loss = None
             for j in range(num_actors):
+                loss = initial
+                self.canvas.fill(255)
                 # copy canvas and move RGB channel dimension to front
                 # torch_canvas now has dimensions 3 x height x width
-                value_canvas = torch.moveaxis(torch.from_numpy(self.canvas).float(), 2, 0)
-                # add new dimension to tell network where we plan to center the circle
-                policy_canvas = torch.cat((torch.zeros(1, self.height, self.width), value_canvas), dim=0)
+                torch_canvas = torch.moveaxis(torch.from_numpy(self.canvas.copy()).float(), 2, 0)
 
-                # actual_rewards contains the discounted rewards from each timestep
-                actual_rewards = 0
-                # estimated_rewards contains the discounted total reward estimate — this
-                # is what we try to learn
-                estimated_rewards = float(self.value_network(value_canvas))
-
+                advantages = []
                 curr_log_probs = []
                 # 1. Run the current policy for T timesteps
                 for t in range(T):
-                    # If first iteration, we don't have an old policy, so we move to the next step
+                    # If on first iteration, we don't have an old policy, we move to the next step
                     if next_coords == []:
                         break
 
                     # Get log probability of previous action using the current policy network
                     y_coord, x_coord = next_coords[t]
+
+                    # add new dimension to tell network where we plan to center the circle
+                    policy_canvas = torch.cat((torch.zeros(1, self.height, self.width), torch_canvas), dim=0)
+                    policy_canvas[0][y_coord][x_coord] = 1
+
                     action_t = prev_actions[t]
-                    action_distribution = self.get_action_distribution((y_coord, x_coord), policy_canvas)
+                    action_distribution = self.get_action_distribution(policy_canvas)
                     log_prob = action_distribution.log_prob(action_t).sum()
                     curr_log_probs.append(log_prob)
 
                     action = torch.clamp(action_t, min=0, max=1)  # Make action non-negative
-
-                    actual_rewards += (discount_factor ** (min(t-1, 0))) * self.get_reward_from_action(y_coord, x_coord, action, self.canvas)
-
-                # TODO: update canvas with new pixels placed
-                self.runner.render()
-                print("ARE WE RENDERING???...")
+                    reward = self.get_reward_from_action(y_coord, x_coord, action, self.canvas)
+                    print(f"Reward: {reward}")
+                    loss -= reward
+                    advantages.append(0.9 ** max(t - 1, 0) * reward)
 
                 # 2. Prepare random x, y coords for after we update the policy, and get probability
                 # values to calculate r_theta for each of the T actions
+                old_log_probs = prev_log_probs
                 next_coords = []
                 prev_actions = []
                 prev_log_probs = []
                 for _ in range(T):
                     # y_x_coords = (random.randint(0, self.height - 1), random.randint(0, self.width - 1))
-                    y_x_coords = (20, 20)
-                    next_coords.append(y_x_coords)
-                    action, log_prob = self.get_action_and_log_prob(y_x_coords, policy_canvas)
+                    y, x = (160, 10)
+                    policy_canvas = torch.cat((torch.zeros(1, self.height, self.width), torch_canvas), dim=0)
+                    policy_canvas[0][y][x] = 1
+                    next_coords.append((y, x))
+                    action, log_prob = self.get_action_and_log_prob(policy_canvas)
                     prev_actions.append(action)
                     prev_log_probs.append(log_prob)
 
-                # 3. Compute advantage estimates (ignore first dummy element)
-                if curr_log_probs != []:
-                    # advantages = torch.tensor([actual_rewards[i] - estimated_rewards[i] for i in range(1, T + 1)])
-                    # # Normalize advantages
-                    # advantages = (advantages - advantages.mean()) / (advantages.std(dim=0) + 1e-8)
-                    advantages = actual_rewards - estimated_rewards
+                # 3. Compute advantage estimate — here a state has high advantage if the loss is low
+                if len(curr_log_probs) != 0:
+                    # list of prob differences for each sampled action through T timesteps
+                    differences = torch.stack(curr_log_probs) - torch.stack(old_log_probs)
+                    r_theta = torch.exp(differences)
+                    print(f"R_theta: {r_theta}")
+                    # print(f"Advantages: {advantages}")
+                    print(f"Curr log probs: {curr_log_probs}")
+                    print(f"Old log probs: {old_log_probs}")
+                    # advantages = torch.tensor(advantages)
+                    #
+                    # term1 = advantages * r_theta
+                    # term2 = torch.clamp(r_theta, 1 - epsilon, 1 + epsilon) * advantages
+                    #
+                    # policy_loss = -torch.min(term1, term2).mean()
+                    policy_loss = torch.sum(torch.stack(curr_log_probs))
+                    print(f"Loss: {policy_loss}")
 
-                    r_theta = torch.exp(torch.tensor(curr_log_probs) - torch.tensor(prev_log_probs))
-
-                    term1 = advantages * r_theta
-                    term2 = torch.clamp(r_theta, 1 - epsilon, 1 + epsilon) * advantages
-
-                    policy_loss = Variable(torch.min(term1, term2).mean(), requires_grad=True)
-                    value_loss = Variable(nn.MSELoss()(torch.tensor(estimated_rewards), torch.tensor(actual_rewards)), requires_grad=True)
-                    print(policy_loss)
-                    print(value_loss)
+                    initial_state_dict = copy.deepcopy(self.policy_network.state_dict())
 
                     optimizer_policy.zero_grad()
                     policy_loss.backward()
                     optimizer_policy.step()
 
-                    optimizer_value.zero_grad()
-                    value_loss.backward()
-                    optimizer_value.step()
+                    current_state_dict = self.policy_network.state_dict()
+                    parameters_changed = False
+                    for name, param in initial_state_dict.items():
+                        if not torch.equal(param, current_state_dict[name]):
+                            parameters_changed = True
+                            break
+
+                    # Print a message if parameters have changed
+                    if parameters_changed:
+                        print("Policy network parameters have changed.")
+                    else:
+                        print("Policy network parameters have not changed.")
+
+            end = time()
+            print(f"Iteration {i} - {(end - start) / 60} min; loss - {loss}")
+            print(f"Completion: {(initial - loss) / initial * 100}")
+            self.runner.render()
+
+            # TODO: make loss function use torch operations so that autograd works
