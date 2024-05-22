@@ -64,14 +64,12 @@ class RLAgent(Agent):
         #   - input: x, y (normalized to [0, 1])
         #   - output: mean radius, mean r, mean g, mean b
         #             variance radius, variance r, variance g, variance b
-
-        # Policy network using CNN:
-        # 4th channel is 1 if pixel is the center for the circle to be placed
-        # 0 otherwise
         self.policy_network = nn.Sequential(
-            nn.Linear(2, 16),  # Input size is 2 (two float inputs), output size is 16
+            nn.Conv2d(1, 1, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Linear(16, 8),  # Hidden layer from 16 to 8
+            nn.Flatten(),
+            nn.Linear(width * height, 8),  # output size is 8 for the specified means and variances
+            nn.LayerNorm(8),
             nn.Sigmoid()  # activation for bounding output between 0 and 1
         )
 
@@ -84,7 +82,7 @@ class RLAgent(Agent):
         #         self.relu_to_range(r, 0, 255),
         #         self.relu_to_range(g, 0, 255),
         #         self.relu_to_range(b, 0, 255))
-        return (2,
+        return (self.width // 10,
                 self.activation_to_range(r, 0, 255),
                 self.activation_to_range(g, 0, 255),
                 self.activation_to_range(b, 0, 255))
@@ -99,16 +97,24 @@ class RLAgent(Agent):
         return -loss_after
 
     def get_action_distribution(self, y, x):
-        action_means_variances = self.policy_network(torch.tensor([y, x]))
-        action_means = torch.stack([action_means_variances[0],
-                                    action_means_variances[1],
-                                    action_means_variances[2],
-                                    action_means_variances[3]])
-        action_variances = nn.Softplus()(torch.stack([action_means_variances[4],
-                                                      action_means_variances[5],
-                                                      action_means_variances[6],
-                                                      action_means_variances[7]]))
-        action_variances = torch.tensor([0.05, 0.05, 0.05, 0.05])
+        canvas = torch.zeros(1, self.height, self.width)
+        radius = self.width // 10
+        grid_y, grid_x = torch.meshgrid(torch.arange(canvas.size(1)), torch.arange(canvas.size(2)))
+        distances = torch.sqrt((grid_y - y) ** 2 + (grid_x - x) ** 2)
+
+        # Create a mask for pixels within the radius
+        mask = distances <= radius
+        canvas[0, mask] = 1
+
+        action_means_variances = self.policy_network(canvas)
+        action_means = torch.stack([action_means_variances[0][0],
+                                    action_means_variances[0][1],
+                                    action_means_variances[0][2],
+                                    action_means_variances[0][3]])
+        action_variances = nn.ReLU()(torch.stack([action_means_variances[0][4] * 0.2 + 0.1,
+                                                  action_means_variances[0][5] * 0.2 + 0.1,
+                                                  action_means_variances[0][6] * 0.2 + 0.1,
+                                                  action_means_variances[0][7] * 0.2 + 0.1]))
 
         action_distribution = torch.distributions.Normal(action_means, action_variances)
         return action_distribution
@@ -137,7 +143,7 @@ class RLAgent(Agent):
         start = time()
         initial = self.compute_loss()
 
-        for i in range(100000):
+        for i in range(1000000):
             loss = None
             for j in range(num_actors):
                 loss = initial
@@ -154,11 +160,11 @@ class RLAgent(Agent):
                     y_coord, x_coord = next_coords[t]
 
                     action_t = prev_actions[t]
-                    action_distribution = self.get_action_distribution(y_coord / self.height, x_coord / self.width)
+                    action_distribution = self.get_action_distribution(y_coord, x_coord)
                     log_prob = action_distribution.log_prob(action_t).sum()
                     curr_log_probs.append(log_prob)
 
-                    if i % 50 == 0 and j == 0:
+                    if i % 100 == 0 and j == 0:
                         print(f"Action distribution: {action_distribution.loc, action_distribution.scale}")
 
                     action = torch.clamp(action_t, min=0, max=1)  # Bound action because of variance
@@ -173,22 +179,23 @@ class RLAgent(Agent):
                 prev_actions = []
                 prev_log_probs = []
                 for _ in range(T):
-                    y, x = (random.randint(0, self.height - 1), random.randint(0, self.width - 1))
+                    # y, x = (random.randint(0, self.height - 1), random.randint(0, self.width - 1))
+                    y, x = 20, 20
                     next_coords.append((y, x))
-                    action, log_prob = self.get_action_and_log_prob(y / self.height, x / self.width)
+                    action, log_prob = self.get_action_and_log_prob(y, x)
                     prev_actions.append(action)
                     prev_log_probs.append(log_prob)
 
                 # 3. Compute advantage estimate — here a state has high advantage if the loss is low
-                if len(curr_log_probs) != 0 and i % 50 == 0 and j == 0:
+                if len(curr_log_probs) != 0 and i % 1000 == 0 and j == 0:
                     # list of prob differences for each sampled action through T timesteps
                     differences = torch.stack(curr_log_probs) - torch.stack(old_log_probs)
                     r_theta = torch.exp(differences)
-                    print(f"R_theta: {r_theta}")
-                    print(f"Curr log probs: {curr_log_probs}")
-                    print(f"Old log probs: {old_log_probs}")
+                    # print(f"R_theta: {r_theta}")
+                    # print(f"Curr log probs: {curr_log_probs}")
+                    # print(f"Old log probs: {old_log_probs}")
                     advantages = torch.tensor(advantages)
-                    print(f"high = good: {advantages}")
+                    # print(f"Advantages: {advantages}")
 
                     term1 = advantages * r_theta
                     term2 = torch.clamp(r_theta, 1 - epsilon, 1 + epsilon) * advantages
@@ -196,33 +203,29 @@ class RLAgent(Agent):
                     policy_loss = -torch.min(term1, term2).mean()
                     print(f"Loss: {policy_loss}")
 
-                    initial_state_dict = copy.deepcopy(self.policy_network.state_dict())
+                    # initial_state_dict = copy.deepcopy(self.policy_network.state_dict())
 
                     optimizer_policy.zero_grad()
                     policy_loss.backward()
                     optimizer_policy.step()
 
-                    if i % 500 == 0 and j == 0:
+                    if i % 1000 == 0 and j == 0:
                         end = time()
                         print(f"Iteration {i} - {(end - start) / 60} min; loss - {loss}")
                         print(f"Completion: {(initial - loss) / initial * 100}")
                         self.runner.render()
 
-                        y, x = (280, 200)
-                        action_distribution = self.get_action_distribution(y / self.height, x / self.width)
-                        print(f"New distribution: {action_distribution.loc, action_distribution.scale}")
-
-                    current_state_dict = self.policy_network.state_dict()
-                    parameters_changed = False
-                    for name, param in initial_state_dict.items():
-                        if not torch.equal(param, current_state_dict[name]):
-                            parameters_changed = True
-                            break
-
-                    # Print a message if parameters have changed
-                    if parameters_changed:
-                        print("Policy network parameters have changed.")
-                    else:
-                        print("Policy network parameters have not changed.")
+                    # current_state_dict = self.policy_network.state_dict()
+                    # parameters_changed = False
+                    # for name, param in initial_state_dict.items():
+                    #     if not torch.equal(param, current_state_dict[name]):
+                    #         parameters_changed = True
+                    #         break
+                    #
+                    # # Print a message if parameters have changed
+                    # if parameters_changed:
+                    #     print("Policy network parameters have changed.")
+                    # else:
+                    #     print("Policy network parameters have not changed.")
 
             # only thing we can learn in our network is the probability distribution of actions for a given input
