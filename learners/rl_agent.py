@@ -178,7 +178,6 @@ class RLAgent(Agent):
 
                 # TODO: update canvas with new pixels placed
                 self.runner.render()
-                print("ARE WE RENDERING???...")
 
                 # 2. Prepare random x, y coords for after we update the policy, and get probability
                 # values to calculate r_theta for each of the T actions

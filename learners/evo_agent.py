@@ -11,6 +11,9 @@ class EvoAgent(Agent):
         self.initial_sector_loss = {}
 
     def get_sector(self, num_divisions, i):
+        """
+            Get boundaries of a specific region of an image
+        """
         i = i % (num_divisions ** 2)
         x_start = (i % num_divisions) * (self.width // num_divisions)
         x_end = ((i % num_divisions) + 1) * (self.width // num_divisions)
@@ -19,6 +22,10 @@ class EvoAgent(Agent):
         return x_start, x_end, y_start, y_end
 
     def continue_sector(self, i, x_start, x_end, y_start, y_end):
+        """
+            Determine whether this region of the image is close enough to the original
+            so that we can stop placing pixels here
+        """
         sector = self.original[y_start:y_end, x_start:x_end]
 
         if i in self.initial_sector_loss:
