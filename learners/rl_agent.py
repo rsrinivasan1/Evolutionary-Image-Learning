@@ -65,22 +65,30 @@ class RLAgent(Agent):
         #   - output: mean radius, mean r, mean g, mean b
         #             variance radius, variance r, variance g, variance b
         self.policy_network = nn.Sequential(
-            nn.Linear(2, 16),
+            nn.Linear(20, 128),
             nn.ReLU(),
-            nn.Linear(16, 32),
+            nn.Linear(128, 256),
             nn.ReLU(),
-            nn.Linear(32, 64),
+            nn.Linear(256, 1024),
             nn.ReLU(),
-            nn.Linear(64, 8),
-            nn.Sigmoid()
+            nn.Linear(1024, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 4),
+            nn.Sigmoid(),
         )
 
         # self.policy_network = nn.Sequential(
         #     nn.Conv2d(1, 1, kernel_size=3, stride=1, padding=1),
         #     nn.ReLU(),
+        #     nn.MaxPool2d(kernel_size=2, stride=2),  # Added max pooling with kernel size 2 and stride 2
+        #     nn.ReLU(),
+        #     nn.Conv2d(1, 1, kernel_size=3, stride=1, padding=1),
+        #     nn.ReLU(),
         #     nn.Flatten(),
-        #     nn.Linear(width * height, 8),  # output size is 8 for the specified means and variances
-        #     nn.LayerNorm(8),
+        #     nn.Linear((width // 2) * (height // 2), 4),  # output size is 4 for the specified means and variances
+        #     nn.LayerNorm(4),
         #     nn.Sigmoid()
         # )
 
@@ -99,35 +107,35 @@ class RLAgent(Agent):
         shape = self.create_shape((x, y), radius, canvas, torch.stack([b, g, r]))
         # loss_before = shape.loss_before()
         # loss_after = shape.loss_after_torch()
-        # print(loss_after)
 
         average_color = shape.get_average_color_under_original()
 
-        # # perform action
+        # perform action
         shape.update(pytorch=True)
         # Return high reward for low loss
         return 0, (r - average_color[2]) ** 2 + (g - average_color[1]) ** 2 + (b - average_color[0]) ** 2
-        # return 0, (r - 255) ** 2 + (g - 0) ** 2 + (b - 0) ** 2
-
 
     def get_action_distribution(self, y, x):
-        action_means_variances = self.policy_network(torch.tensor([y, x]).float())
-        action_means = torch.stack([action_means_variances[0],
-                                    action_means_variances[1],
-                                    action_means_variances[2],
-                                    action_means_variances[3]])
-        action_variances = nn.ReLU()(torch.stack([action_means_variances[4] * 0.2,
-                                                  action_means_variances[5] * 0.2,
-                                                  action_means_variances[6] * 0.2,
-                                                  action_means_variances[7] * 0.2]))
+        y = y / self.height
+        x = x / self.width
+        action_means_variances = self.policy_network(torch.tensor([y, y, y, y, y, y, y, y, y, y,
+                                                                   x, x, x, x, x, x, x, x, x, x]).float())
+        # action_means = torch.stack([action_means_variances[0],
+        #                             action_means_variances[1],
+        #                             action_means_variances[2],
+        #                             action_means_variances[3]])
+        # action_variances = nn.ReLU()(torch.stack([action_means_variances[4] * 0.2 + 0.001,
+        #                                           action_means_variances[5] * 0.2 + 0.001,
+        #                                           action_means_variances[6] * 0.2 + 0.001,
+        #                                           action_means_variances[7] * 0.2 + 0.001]))
 
         # canvas = torch.zeros(1, self.height, self.width)
         # canvas[0, y, x] = 1
         # radius = self.width // 10
         # grid_y, grid_x = torch.meshgrid(torch.arange(canvas.size(1)), torch.arange(canvas.size(2)))
         # distances = torch.sqrt((grid_y - y) ** 2 + (grid_x - x) ** 2)
-        #
-        # # Create a mask for pixels within the radius
+
+        # Create a mask for pixels within the radius
         # mask = distances <= radius
         # canvas[0, mask] = 1
         #
@@ -141,15 +149,17 @@ class RLAgent(Agent):
         #                                           action_means_variances[0][6] * 0.1,
         #                                           action_means_variances[0][7] * 0.1]))
 
-        action_distribution = torch.distributions.Normal(action_means, action_variances)
-        return action_distribution
+        # action_distribution = torch.distributions.Normal(action_means, action_variances)
+        # return action_distribution
+        return action_means_variances
 
     def get_action_and_log_prob(self, y, x):
         action_distribution = self.get_action_distribution(y, x)
-        orig_action = action_distribution.rsample()
-        log_prob = action_distribution.log_prob(orig_action)
+        # orig_action = action_distribution.rsample()
+        # log_prob = action_distribution.log_prob(orig_action)
 
-        return orig_action, log_prob
+        # return orig_action, log_prob
+        return action_distribution, 0
 
     def train(self):
         """
@@ -165,8 +175,15 @@ class RLAgent(Agent):
         for i in range(100000):
 
             # Get log probability of previous action using the current policy network
-            y_coord, x_coord = random.randint(0, self.height - 1), random.randint(0, self.width - 1)
-            # y_coord, x_coord = 7, 12
+            # y_coord, x_coord = random.randint(0, self.height - 1), random.randint(0, self.width - 1)
+            j = i // 500
+            num = self.width // 10
+            y_coord, x_coord = (j % (self.height * self.width // (num ** 2))) // (self.width // num), (j % (self.height * self.width // (num ** 2))) % (self.width // num)
+            y_coord, x_coord = y_coord * num, x_coord * num
+            if i % 2 == 0:
+                y_coord, x_coord = 10, 160
+            else:
+                y_coord, x_coord = 10, 120
 
             action_t, log_prob = self.get_action_and_log_prob(y_coord, x_coord)
 
@@ -190,8 +207,8 @@ class RLAgent(Agent):
                 policy_loss.backward()
                 optimizer_policy.step()
 
-                distribution = self.get_action_distribution(y_coord, x_coord)
-                print(f"Action distribution: {distribution.loc, distribution.scale}")
+                # distribution = self.get_action_distribution(y_coord, x_coord)
+                # print(f"Action distribution: {distribution.loc, distribution.scale}")
 
                 end = time()
                 print(f"Iteration {i} - {(end - start) / 60} min; loss - {loss}")
