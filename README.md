@@ -6,7 +6,7 @@
 
 In this project, I sought to use evolutionary methods to estimate an RGB image, inspired by the [Circle Evolution](https://github.com/ahmedkhalf/Circle-Evolution/) project by Ahmed Khalf. To do this, we start by randomly throwing colored circles onto a blank canvas. Those that improve the image loss by a certain threshold are retained, so that new circles are placed on top of old ones.
 
-In future iterations, when we pick an (x, y) coordinate to place a colored circle, the color distribution is centered about the average color surrounding that (x, y) coordinate. In this way, this evolutionary algorithm is able to tend toward the correct RGB values at each (x, y) coordinate. Each randomly generated circle that reduces the loss swings the color distribution closer to the true color, and eventually we end up with an image resembling the original.
+In future iterations, when we pick an (x, y) coordinate to place a colored circle, the color distribution is centered about the average color of placed pixels (not of the original image) surrounding that (x, y) coordinate. In this way, this evolutionary algorithm is able to tend toward the correct RGB values at each (x, y) coordinate. Each randomly generated circle that reduces the loss swings the color distribution closer to the true color, and eventually we end up with an image resembling the original.
 
 --------
 ## Reinforcement Learning Trials
